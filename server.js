@@ -63,7 +63,8 @@ const alertTransitions = {
   "待复核": ["review"],
   "已复核": ["close"]
 };
-const reviewActions = ["release", "recall"];
+// 提交人回避：放行、召回与复核都不能由预警提交人本人执行
+const recusalActions = ["release", "recall", "review"];
 const retestStatuses = ["待复测", "已完成"];
 
 const newSeed = () => {
@@ -558,10 +559,10 @@ function riskPage() {
         '已复核':[['close','关闭并解冻','']] }[a.status] || [];
       return next.map(([act,label,cls]) => {
         const mine = a.createdBy === actor();
-        const reviewBlocked = (act==='release'||act==='recall') && mine;
+        const reviewBlocked = (act==='release'||act==='recall'||act==='review') && mine;
         const recallBlocked = act==='close' && a.decision==='召回' && state.retests.some(r=>r.alertId===a.id && r.status!=='已完成');
         const dis = reviewBlocked || recallBlocked;
-        const title = reviewBlocked ? '提交人不能审核' : (recallBlocked ? '复测全部完成后才能关闭召回预警' : '');
+        const title = reviewBlocked ? '提交人需回避，须由其他操作人执行' : (recallBlocked ? '复测全部完成后才能关闭召回预警' : '');
         return '<button class="'+cls+'" data-alert="'+a.id+'" data-act="'+act+'" '+(dis?'disabled title="'+title+'"':'')+'>'+label+'</button>';
       }).join(' ');
     }
@@ -818,7 +819,7 @@ const server = http.createServer(async (req, res) => {
         const last = alert.timeline[alert.timeline.length - 1];
         if (last && last.actionKey === action) throw new ApiError(409, "duplicate_transition");
 
-        if (reviewActions.includes(action) && alert.createdBy === user.id) {
+        if (recusalActions.includes(action) && alert.createdBy === user.id) {
           throw new ApiError(403, "submitter_cannot_review");
         }
 

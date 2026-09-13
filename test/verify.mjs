@@ -181,8 +181,20 @@ async function main() {
   ok("被拒后审计条数不变", trace3blocked.audit.length === auditBeforeReview);
   ok("被拒后冻结仍在（未误解冻）", trace3blocked.freezes.filter(f => f.status === "冻结中").length === fzBeforeReview && fzBeforeReview > 0);
 
+  // 提交人回避：预警由 u01 提交、u02 召回；u01 不能在待复核阶段自行复核
+  const selfReview403 = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u01", body: { action: "review" }, raw: true });
+  ok("提交人不能自行复核 403", selfReview403.status === 403 && selfReview403.json.error === "submitter_cannot_review", selfReview403.json);
+  const traceSelfBlocked = await api("/api/trace");
+  const aSelf = traceSelfBlocked.alerts.find(a => a.id === aid);
+  ok("自行复核被拒后状态仍待复核", aSelf.status === "待复核");
+  ok("自行复核被拒后不进入已复核、不记录复核人", aSelf.status !== "已复核" && !aSelf.reviewedBy);
+  ok("自行复核被拒后时间线无复核通过", !aSelf.timeline.some(e => e.action === "复核通过"));
+  ok("自行复核被拒后审计条数不变", traceSelfBlocked.audit.length === auditBeforeReview);
+  ok("自行复核被拒后冻结仍在", traceSelfBlocked.freezes.filter(f => f.status === "冻结中").length === fzBeforeReview);
+
   const reviewed = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "review", note: "复核合格" } });
   ok("复核后进入已复核", reviewed.status === "已复核" && reviewed.reviewedBy === "周复核");
+  ok("复核人不是预警提交人", reviewed.reviewedBy !== "沈研工" && reviewed.createdByName === "沈研工");
 
   const dupReview = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "review" }, raw: true });
   ok("已复核后重复复核 409", dupReview.status === 409);
@@ -246,8 +258,18 @@ async function main() {
   ok("放行后状态=待复核，决策=放行", rel.status === "待复核" && rel.decision === "放行");
   const relCloseEarly = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "close" }, raw: true });
   ok("放行路径未复核直接关闭 409 review_required", relCloseEarly.status === 409 && relCloseEarly.json.error === "review_required");
+  // 放行路径同样执行提交人回避：u01 提交、u02 放行，u01 不能自行复核
+  const relAuditBefore = (await api("/api/trace")).audit.length;
+  const relSelfReview = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u01", body: { action: "review" }, raw: true });
+  ok("放行路径提交人自行复核 403", relSelfReview.status === 403 && relSelfReview.json.error === "submitter_cannot_review");
+  const relBlockedTrace = await api("/api/trace");
+  const relBlockedAlert = relBlockedTrace.alerts.find(a => a.id === relAlert.id);
+  ok("放行路径自行复核被拒后状态/复核人/审计/冻结不变",
+    relBlockedAlert.status === "待复核" && !relBlockedAlert.reviewedBy
+    && relBlockedTrace.audit.length === relAuditBefore
+    && relBlockedTrace.freezes.filter(f => f.alertId === relAlert.id && f.status === "冻结中").length > 0);
   const relReviewed = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "review" } });
-  ok("放行路径复核后=已复核", relReviewed.status === "已复核");
+  ok("放行路径复核后=已复核，复核人为非提交人", relReviewed.status === "已复核" && relReviewed.reviewedBy === "周复核");
   const relClosed = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "close" } });
   ok("放行路径已复核后可关闭并解冻", relClosed.status === "已关闭" && (await api("/api/trace")).freezes.filter(f => f.alertId === relAlert.id && f.status === "冻结中").length === 0);
 

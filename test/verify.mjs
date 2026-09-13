@@ -167,7 +167,28 @@ async function main() {
   const trace3 = await api("/api/trace");
   const retests = trace3.retests.filter(r => r.alertId === aid);
   ok("生成 2 个复测任务", retests.length === 2);
-  await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "review" } });
+  const trace3pre = await api("/api/trace");
+  const auditBeforeReview = trace3pre.audit.length;
+  const fzBeforeReview = trace3pre.freezes.filter(f => f.status === "冻结中").length;
+
+  // 关键修复：待复核未先复核，直接关闭必须明确失败，且状态/时间线/审计/冻结均不变
+  const closeBeforeReview = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "close" }, raw: true });
+  ok("待复核未复核直接关闭 409 review_required", closeBeforeReview.status === 409 && closeBeforeReview.json.error === "review_required", closeBeforeReview.json);
+  const trace3blocked = await api("/api/trace");
+  const aBlocked = trace3blocked.alerts.find(a => a.id === aid);
+  ok("被拒后状态仍是待复核", aBlocked.status === "待复核");
+  ok("被拒后时间线未新增复核/关闭", !aBlocked.timeline.some(e => e.action === "复核通过" || e.action === "关闭并解冻"));
+  ok("被拒后审计条数不变", trace3blocked.audit.length === auditBeforeReview);
+  ok("被拒后冻结仍在（未误解冻）", trace3blocked.freezes.filter(f => f.status === "冻结中").length === fzBeforeReview && fzBeforeReview > 0);
+
+  const reviewed = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "review", note: "复核合格" } });
+  ok("复核后进入已复核", reviewed.status === "已复核" && reviewed.reviewedBy === "周复核");
+
+  const dupReview = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "review" }, raw: true });
+  ok("已复核后重复复核 409", dupReview.status === 409);
+  const backToConfirm = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u02", body: { action: "confirm" }, raw: true });
+  ok("已复核后回退确认=非法跳转 409", backToConfirm.status === 409 && backToConfirm.json.error === "illegal_transition");
+
   const closeEarly = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "close" }, raw: true });
   ok("复测未完成时关闭 409", closeEarly.status === 409 && closeEarly.json.error === "retest_pending");
   const dupRetest = await api(`/api/retests/${retests[0].id}/complete`, { method: "POST", body: { result: "重测合格", score: 91 } });
@@ -175,9 +196,18 @@ async function main() {
   ok("复测重复提交 409", again.status === 409);
   await api(`/api/retests/${retests[1].id}/complete`, { method: "POST", body: { result: "重测合格", score: 92 } });
   const closed = await api(`/api/alerts/${aid}/transition`, { method: "POST", user: "u03", body: { action: "close" } });
-  ok("复测完成后关闭", closed.status === "已关闭");
+  ok("已复核且复测完成后关闭", closed.status === "已关闭");
   const trace4 = await api("/api/trace");
   ok("关闭后全部解冻", trace4.freezes.every(f => f.status === "已解冻") && trace4.items !== undefined);
+  const finalAlert = trace4.alerts.find(a => a.id === aid);
+  const seq = finalAlert.timeline.map(e => e.action);
+  ok("时间线顺序=提交→确认→处理→审核召回→复核通过→关闭并解冻",
+    JSON.stringify(seq) === JSON.stringify(["提交预警", "确认预警", "开始处理", "审核召回", "复核通过", "关闭并解冻"]), seq);
+  ok("审计含复核且顺序在关闭之前", (() => {
+    const ri = trace4.audit.findIndex(e => e.action === "复核" && e.entityId === aid);
+    const ci = trace4.audit.findIndex(e => e.action === "关闭预警" && e.entityId === aid);
+    return ri >= 0 && ci >= 0 && ri < ci;
+  })());
   ok("审计链完整（提交/确认/处理/召回/复核/复测/关闭）", trace4.audit.length >= 8);
 
   /* ---------- 阶段 6：写失败回滚（无部分落盘） ---------- */
@@ -204,13 +234,31 @@ async function main() {
   const recover = await api("/api/batches", { method: "POST", body: { id: "B-301", material: "恢复批" } });
   ok("写失败后服务仍可正常提交", recover.id === "B-301");
 
-  /* ---------- 阶段 7：硬重启（SIGKILL）后关系/版本一致 ---------- */
-  console.log("\n[7] SIGKILL 硬重启：关系与版本一致");
+  /* ---------- 阶段 7：放行路径同样必须先复核 ---------- */
+  console.log("\n[7] 放行路径：待复核不能跳过复核直接关闭");
+  await api("/api/batches", { method: "POST", body: { id: "B-500", material: "放行批" } });
+  await api("/api/samples", { method: "POST", body: { id: "SY-5", batchId: "B-500" } });
+  await api("/api/trials", { method: "POST", body: { itemCode: "IS-002", batchId: "B-500", sampleId: "SY-5", score: 83 } });
+  const relAlert = await api("/api/alerts", { method: "POST", user: "u01", body: { batchId: "B-500", riskLevel: "低", reason: "轻微波动" } });
+  await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u02", body: { action: "confirm" } });
+  await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u02", body: { action: "start" } });
+  const rel = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u02", body: { action: "release" } });
+  ok("放行后状态=待复核，决策=放行", rel.status === "待复核" && rel.decision === "放行");
+  const relCloseEarly = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "close" }, raw: true });
+  ok("放行路径未复核直接关闭 409 review_required", relCloseEarly.status === 409 && relCloseEarly.json.error === "review_required");
+  const relReviewed = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "review" } });
+  ok("放行路径复核后=已复核", relReviewed.status === "已复核");
+  const relClosed = await api(`/api/alerts/${relAlert.id}/transition`, { method: "POST", user: "u03", body: { action: "close" } });
+  ok("放行路径已复核后可关闭并解冻", relClosed.status === "已关闭" && (await api("/api/trace")).freezes.filter(f => f.alertId === relAlert.id && f.status === "冻结中").length === 0);
+
+  /* ---------- 阶段 8：硬重启（SIGKILL）后关系/版本一致 ---------- */
+  console.log("\n[8] SIGKILL 硬重启：关系与版本一致");
+  const revBeforeRestart = (await readDb()).revision;
   await stopHard(server); server = null;
   server = await startServer();
   const c1 = await api("/api/consistency");
   ok("重启后一致性自检通过", c1.ok === true, c1.problems);
-  ok("重启后 revision 与文件一致", c1.revision === afterFail.revision + 1);
+  ok("重启后 revision 与文件一致（不回退、不跳变）", c1.revision === revBeforeRestart);
   const trace5 = await api("/api/trace");
   const a5 = trace5.alerts.find(a => a.id === aid);
   ok("预警状态/快照/时间线持久", a5.status === "已关闭" && a5.recallSnapshot && a5.timeline.length >= 6);

@@ -54,12 +54,14 @@ const userMap = Object.fromEntries(users.map(u => [u.id, u]));
 
 const riskLevels = ["低", "中", "高"];
 // 预警生命周期：提交 → 确认 → 处理（放行/召回）→ 复核 → 关闭
-const alertStatuses = ["待确认", "已确认", "处理中", "待复核", "已关闭"];
+// “待复核”必须先 review 进入“已复核”，未复核直接关闭会被明确拒绝（review_required）
+const alertStatuses = ["待确认", "已确认", "处理中", "待复核", "已复核", "已关闭"];
 const alertTransitions = {
   "待确认": ["confirm"],
   "已确认": ["start"],
   "处理中": ["release", "recall"],
-  "待复核": ["review", "close"]
+  "待复核": ["review"],
+  "已复核": ["close"]
 };
 const reviewActions = ["release", "recall"];
 const retestStatuses = ["待复测", "已完成"];
@@ -552,7 +554,8 @@ function riskPage() {
     function transitionButtons(a) {
       const next = { '待确认':[['confirm','确认预警','secondary']], '已确认':[['start','开始处理','secondary']],
         '处理中':[['release','审核放行',''],['recall','审核召回','danger']],
-        '待复核':[['review','复核','secondary'],['close','关闭','']] }[a.status] || [];
+        '待复核':[['review','复核通过','secondary']],
+        '已复核':[['close','关闭并解冻','']] }[a.status] || [];
       return next.map(([act,label,cls]) => {
         const mine = a.createdBy === actor();
         const reviewBlocked = (act==='release'||act==='recall') && mine;
@@ -806,6 +809,10 @@ const server = http.createServer(async (req, res) => {
         const alert = db.alerts.find(a => a.id === transitionMatch[1]);
         if (!alert) throw new ApiError(404, "alert_not_found");
         const legal = (alertTransitions[alert.status] || []).includes(action);
+        // 明确失败：待复核状态必须先复核，未复核直接关闭不允许（状态与审计均不变）
+        if (!legal && action === "close" && alert.status === "待复核") {
+          throw new ApiError(409, "review_required");
+        }
         if (!legal) throw new ApiError(409, "illegal_transition", { from: alert.status, action });
         // 重复提交：同状态重复进入同一动作直接拒绝
         const last = alert.timeline[alert.timeline.length - 1];
@@ -862,11 +869,15 @@ const server = http.createServer(async (req, res) => {
           alert.timeline.push({ at: nowIso(), actionKey: action, action: "审核" + alert.decision, by: user.name, note });
           addAudit(ctx, { action: "审核" + alert.decision, entityType: "alert", entityId: alert.id, actor: user.name, detail: { retests: action === "recall" ? db.retests.filter(r => r.alertId === alert.id).length : 0 } });
         } else if (action === "review") {
-          // 复核通过：冻结保持至关闭；记录复核意见
-          alert.timeline.push({ at: nowIso(), actionKey: action, action: "复核通过", by: user.name, note });
+          // 复核通过：进入“已复核”，冻结保持至关闭；记录复核意见
+          alert.status = "已复核";
+          alert.reviewedBy = user.name;
+          alert.reviewedAt = nowIso();
+          alert.timeline.push({ at: alert.reviewedAt, actionKey: action, action: "复核通过", by: user.name, note });
           addAudit(ctx, { action: "复核", entityType: "alert", entityId: alert.id, actor: user.name });
         } else if (action === "close") {
-          // 召回预警：复测全部完成才允许关闭
+          // 前置门禁：必须已复核；召回预警还要求复测全部完成
+          if (alert.status !== "已复核") throw new ApiError(409, "review_required");
           if (alert.decision === "召回") {
             const pending = db.retests.filter(r => r.alertId === alert.id && r.status !== "已完成");
             if (pending.length) throw new ApiError(409, "retest_pending", { pending: pending.length });

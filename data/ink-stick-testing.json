@@ -1,0 +1,47 @@
+{
+  "items": [
+    {
+      "code": "IS-001",
+      "smokeSource": "黄山松烟",
+      "glueRatio": "7.5%",
+      "ageYears": 8,
+      "storage": "恒湿柜B",
+      "status": "已试磨",
+      "logs": [
+        {
+          "at": "2026-06-11",
+          "step": "试磨",
+          "note": "宣纸20滴水，出墨快，评分86",
+          "score": 86
+        }
+      ]
+    },
+    {
+      "code": "IS-002",
+      "smokeSource": "桐油烟",
+      "glueRatio": "8%",
+      "ageYears": 3,
+      "storage": "试样盒C",
+      "status": "重点观察",
+      "logs": [
+        {
+          "at": "2026-06-21T03:50:28.907Z",
+          "step": "试磨",
+          "note": "棉连纸，评分79",
+          "score": 79
+        }
+      ],
+      "tests": [
+        {
+          "at": "2026-06-21T03:50:28.907Z",
+          "paper": "棉连纸",
+          "water": "18滴",
+          "speed": "中",
+          "colorLayer": "偏暖",
+          "sediment": "少",
+          "score": 79
+        }
+      ]
+    }
+  ]
+}

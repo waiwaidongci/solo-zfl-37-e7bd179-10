@@ -43,5 +43,14 @@
         }
       ]
     }
-  ]
+  ],
+  "schemaVersion": 2,
+  "batches": [],
+  "samples": [],
+  "trials": [],
+  "alerts": [],
+  "freezes": [],
+  "retests": [],
+  "audit": [],
+  "revision": 0
 }

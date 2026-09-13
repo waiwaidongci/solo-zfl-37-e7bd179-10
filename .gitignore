@@ -17,3 +17,6 @@ coverage/
 .idea/
 .vscode/
 
+
+# 验证临时库
+data/verify-tmp/
